@@ -13,11 +13,57 @@ Configuration for Robot Vacuum PPO agent.
 
 class Config:
 
-    # Feature dimensions (69D)
-    # 特征维度（69D）
+    # Feature dimensions
+    # 特征维度
     LOCAL_VIEW_LEN = 7 * 7
-    GLOBAL_STATE_LEN = 12
     LEGAL_ACTION_LEN = 8
+
+    # Global state sub-features
+    # 全局状态子特征
+    BASE_GLOBAL_STATE_LEN = 12
+
+    CHARGER_FEATURE_LEN = 4
+
+    CHARGER_PRIMARY_KEYS = (
+        "chargers",
+        "charger_list",
+        "charger_positions",
+        "charger_pos",
+    )
+
+    NPC_PRIMARY_KEYS = (
+        "official_robots",
+        "robots",
+        "robot_list",
+        "npcs",
+        "npc_list",
+        "enemy_robots",
+        "opponent_robots",
+    )
+
+    NPC_DIR_BINS = 8
+    NPC_VEL_DIR_BINS = 8
+    NPC_FEATURE_LEN = 5 + NPC_DIR_BINS + NPC_VEL_DIR_BINS
+
+    TRAJECTORY_FEATURE_LEN = 4
+
+    DIRT_MAP_SIZE = 16
+    DIRT_MAP_FEATURE_LEN = DIRT_MAP_SIZE * DIRT_MAP_SIZE
+
+    MAP_MEMORY_SIZE = 16
+    MAP_MEMORY_CHANNELS = 2
+    MAP_MEMORY_FEATURE_LEN = MAP_MEMORY_SIZE * MAP_MEMORY_SIZE * MAP_MEMORY_CHANNELS
+
+    BFS_RECOMPUTE_INTERVAL = 3
+
+    GLOBAL_STATE_LEN = (
+        BASE_GLOBAL_STATE_LEN
+        + CHARGER_FEATURE_LEN
+        + NPC_FEATURE_LEN
+        + TRAJECTORY_FEATURE_LEN
+        + DIRT_MAP_FEATURE_LEN
+        + MAP_MEMORY_FEATURE_LEN
+    )
 
     FEATURES = [LOCAL_VIEW_LEN, GLOBAL_STATE_LEN, LEGAL_ACTION_LEN]
     FEATURE_SPLIT_SHAPE = FEATURES

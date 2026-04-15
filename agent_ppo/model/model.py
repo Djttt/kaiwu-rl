@@ -46,19 +46,21 @@ class _Encoder(nn.Module):
 
     def __init__(self):
         super().__init__()
+        local_dim = 128
+        global_dim = 128
         self.local_cnn = nn.Sequential(
             _make_conv(1, 16, gain=1.0),
             nn.ReLU(),
             _make_conv(16, 32, gain=1.0),
             nn.ReLU(),
             nn.Flatten(),
-            _make_fc(32 * 7 * 7, 64),
+            _make_fc(32 * 7 * 7, local_dim),
             nn.ReLU(),
         )
         self.global_mlp = nn.Sequential(
-            _make_fc(Config.GLOBAL_STATE_LEN, 32),
+            _make_fc(Config.GLOBAL_STATE_LEN, 256),
             nn.ReLU(),
-            _make_fc(32, 32),
+            _make_fc(256, global_dim),
             nn.ReLU(),
         )
 
@@ -80,6 +82,7 @@ class Model(nn.Module):
         self.device = device
 
         act_num = Config.ACTION_NUM  # 8
+        encoder_out_dim = 256
 
         # Separate actor and critic encoders to reduce gradient interference.
         # 分离 Actor 和 Critic 编码器，减少梯度干扰。
@@ -87,15 +90,15 @@ class Model(nn.Module):
         self.critic_encoder = _Encoder()
 
         self.actor_head = nn.Sequential(
-            _make_fc(96, 64),
+            _make_fc(encoder_out_dim, 128),
             nn.ReLU(),
-            _make_fc(64, act_num, gain=0.01),
+            _make_fc(128, act_num, gain=0.01),
         )
 
         self.critic_head = nn.Sequential(
-            _make_fc(96, 64),
+            _make_fc(encoder_out_dim, 128),
             nn.ReLU(),
-            _make_fc(64, 1, gain=0.01),
+            _make_fc(128, 1, gain=0.01),
         )
 
     def _split_obs(self, s):

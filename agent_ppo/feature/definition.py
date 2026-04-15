@@ -33,7 +33,7 @@ ActData = create_cls(
 # 训练样本数据：字段值为 int 时框架自动按维度处理
 SampleData = create_cls(
     "SampleData",
-    obs=Config.DIM_OF_OBSERVATION,  # 69D feature vector / 特征向量
+    obs=Config.DIM_OF_OBSERVATION,  # feature vector / 特征向量
     legal_action=Config.ACTION_NUM,  # 8D legal action mask / 合法动作掩码
     act=1,  # action index / 执行的动作
     reward=Config.VALUE_NUM,  # 1D reward / 奖励
@@ -71,3 +71,156 @@ def _calc_gae(list_sample_data):
         gae = gae * gamma * lamda + delta
         sample.advantage = gae
         sample.reward_sum = gae + sample.value
+
+
+def _as_1d_feature(feature):
+    """Convert input feature to float32 1D numpy array.
+
+    将输入特征转为 float32 一维数组。
+    """
+    arr = np.asarray(feature, dtype=np.float32).reshape(-1)
+    if arr.size != Config.DIM_OF_OBSERVATION:
+        raise ValueError(
+            f"feature size mismatch: got {arr.size}, expect {Config.DIM_OF_OBSERVATION}"
+        )
+    return arr
+
+
+def _split_feature(feature):
+    """Split full feature into semantic blocks.
+
+    将完整特征拆分为语义分块。
+    """
+    feat = _as_1d_feature(feature)
+
+    local_end = Config.LOCAL_VIEW_LEN
+    global_end = local_end + Config.GLOBAL_STATE_LEN
+
+    global_state = feat[local_end:global_end]
+
+    base_end = Config.BASE_GLOBAL_STATE_LEN
+    charger_end = base_end + Config.CHARGER_FEATURE_LEN
+    npc_end = charger_end + Config.NPC_FEATURE_LEN
+    traj_end = npc_end + Config.TRAJECTORY_FEATURE_LEN
+    dirt_end = traj_end + Config.DIRT_MAP_FEATURE_LEN
+    memory_end = dirt_end + Config.MAP_MEMORY_FEATURE_LEN
+
+    map_memory = global_state[dirt_end:memory_end]
+    half_memory = Config.MAP_MEMORY_FEATURE_LEN // 2
+
+    return {
+        "base": global_state[:base_end],
+        "charger": global_state[base_end:charger_end],
+        "npc": global_state[charger_end:npc_end],
+        "traj": global_state[npc_end:traj_end],
+        "dirt_map": global_state[traj_end:dirt_end],
+        "map_memory_explored": map_memory[:half_memory],
+        "map_memory_dirty": map_memory[half_memory:],
+    }
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _extract_env_score_step(state):
+    """Extract environment score-like signal for one step.
+
+    提取环境单步得分信号（与 RL reward 区分）。
+    """
+    if state is None:
+        return 0.0
+
+    if isinstance(state, dict):
+        for key in ("reward", "step_score", "score", "clean_score"):
+            if key in state:
+                return _to_float(state.get(key), 0.0)
+
+    if hasattr(state, "reward"):
+        return _to_float(getattr(state, "reward"), 0.0)
+
+    return 0.0
+
+
+def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
+    """Compute shaped RL reward from current/next feature states.
+
+    依据当前/下一时刻特征计算强化学习 reward。
+
+    Notes:
+    - Score comes from environment and is only one component here.
+      环境 score 仅作为 reward 的一个组成部分。
+    - Reward integrates task heuristics to improve training signal.
+      reward 融合开发者策略经验以增强训练信号。
+    """
+    cur = _split_feature(obs)
+    nxt = _split_feature(_obs)
+
+    # 1) Score component (environment feedback)
+    # 1) 得分项（环境反馈）
+    step_score = np.clip(_extract_env_score_step(state), 0.0, 10.0)
+    score_term = 0.08 * step_score
+
+    # 2) Cleaning/progress component
+    # 2) 清扫推进项
+    clean_progress_gain = _to_float(nxt["base"][2] - cur["base"][2])
+    progress_term = 4.0 * clean_progress_gain
+
+    # 3) Dirt-density reduction on global map
+    # 3) 全局污渍密度下降项
+    dirt_drop = _to_float(np.mean(cur["dirt_map"]) - np.mean(nxt["dirt_map"]))
+    dirt_term = 0.6 * dirt_drop
+
+    # 4) Exploration bonus from map memory bitmap
+    # 4) 地图记忆探索奖励
+    explored_gain = max(
+        0.0,
+        _to_float(np.mean(nxt["map_memory_explored"]) - np.mean(cur["map_memory_explored"])),
+    )
+    exploration_term = 0.2 * explored_gain
+
+    # 5) Battery-aware charger guidance
+    # 5) 低电量充电引导
+    battery_ratio = _to_float(nxt["base"][1])
+    low_battery = max(0.0, 0.35 - battery_ratio) / 0.35
+    charger_prev = _to_float(cur["charger"][2])
+    charger_next = _to_float(nxt["charger"][2])
+    charger_term = 0.05 * low_battery * (charger_prev - charger_next)
+
+    # 6) NPC risk penalty (distance + approach risk)
+    # 6) NPC 风险惩罚（距离 + 接近趋势）
+    npc_dist = _to_float(nxt["npc"][2])
+    npc_approach = _to_float(nxt["npc"][3])
+    npc_danger = _to_float(nxt["npc"][4])
+    npc_penalty = -0.03 * npc_danger * (1.0 - npc_dist) * (0.5 + npc_approach)
+
+    # 7) Trajectory shaping (avoid loops/backtracking, keep forward efficiency)
+    # 7) 轨迹塑形（减少回环折返，提升推进效率）
+    revisit_ratio = _to_float(nxt["traj"][0])
+    backtrack_flag = _to_float(nxt["traj"][1])
+    turn_rate = _to_float(nxt["traj"][2])
+    progress_eff = _to_float(nxt["traj"][3])
+    traj_term = -0.01 * revisit_ratio - 0.008 * backtrack_flag - 0.005 * turn_rate + 0.01 * progress_eff
+
+    # 8) Small step penalty to encourage efficiency
+    # 8) 时间惩罚（鼓励效率）
+    step_penalty = -0.001
+
+    reward = (
+        score_term
+        + progress_term
+        + dirt_term
+        + exploration_term
+        + charger_term
+        + npc_penalty
+        + traj_term
+        + step_penalty
+    )
+
+    if not np.isfinite(reward):
+        return 0.0
+
+    return float(np.clip(reward, -1.0, 1.0))

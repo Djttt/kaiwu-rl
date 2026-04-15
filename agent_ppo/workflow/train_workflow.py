@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 from agent_ppo.conf.conf import Config
-from agent_ppo.feature.definition import SampleData, sample_process
+from agent_ppo.feature.definition import SampleData, reward_shaping, sample_process
 from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
@@ -124,7 +124,17 @@ class EpisodeRunner:
                 _obs_data, _ = self.agent.observation_process(env_obs)
                 _obs_data.frame_no = frame_no
 
-                reward_scalar = float(self.agent.last_reward)
+                reward_scalar = float(
+                    reward_shaping(
+                        obs=obs_data.feature,
+                        _obs=_obs_data.feature,
+                        state=env_reward,
+                        _state=env_obs.get("observation", {}).get("env_info", {}),
+                        terminated=terminated,
+                        truncated=truncated,
+                        done=done,
+                    )
+                )
                 total_reward += reward_scalar
 
                 # Terminal reward calculation
