@@ -15,14 +15,16 @@ class Config:
 
     # Feature dimensions (69D)
     # 特征维度（69D）
-    FEATURES = [
-        7 * 7,
-        12,
-        8,
-    ]
+    LOCAL_VIEW_LEN = 7 * 7
+    GLOBAL_STATE_LEN = 12
+    LEGAL_ACTION_LEN = 8
+
+    FEATURES = [LOCAL_VIEW_LEN, GLOBAL_STATE_LEN, LEGAL_ACTION_LEN]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURES)
     DIM_OF_OBSERVATION = FEATURE_LEN
+
+    LOCAL_VIEW_SHAPE = (1, 7, 7)
 
     # Action space: 8 directional moves
     # 动作空间：8个方向移动
