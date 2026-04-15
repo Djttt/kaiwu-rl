@@ -80,3 +80,11 @@ env_obs → Preprocessor.feature_process() → 69D feature + legal_action
 2. **Actor/Critic 分离**：避免共享 backbone 带来的梯度干扰
 3. **局部地图裁剪**：21×21 视野中心裁剪 7×7，减少计算量
 4. **PPO 损失**：`total_loss = 0.5 * value_loss + policy_loss - 0.001 * entropy_loss`
+
+## 修改记录
+
+| 日期 | 修改内容 |
+|------|----------|
+| 2026-04-15 | 初始提交：项目框架、PPO 基线实现 |
+| 2026-04-15 | 模型重构：分离 Actor/Critic 编码器 + CNN 局部地图编码器（model.py, conf.py） |
+| 2026-04-15 | 创建 CLAUDE.md，记录代码架构和数据流 |
