@@ -257,3 +257,263 @@ battery_max: 200  # 最大电量（100～999）
 3. **斜向移动**：需要检查防穿角条件，否则会卡在角落原地空耗电量
 4. **模型保存**：平台限制频率，默认每 30 分钟保存一次，不要过度频繁保存
 5. **DIY 算法**：可在 `diy` 模板文件夹中完全自定义算法，不限于 PPO
+
+---
+
+## 开发框架详解
+
+### 环境接口（Environment API）
+
+#### `env.reset(usr_conf)`
+
+重置环境，返回初始观测。
+
+```python
+obs, state = env.reset(usr_conf=usr_conf)
+# obs: dict，环境观测信息
+# state: dict，环境全局信息（EnvInfo）
+```
+
+#### `env.step(act, stop_game=False)`
+
+执行动作，完成状态转移。
+
+```python
+frame_no, _obs, score, terminated, truncated, _state = env.step(act)
+```
+
+| 返回值 | 类型 | 说明 |
+|--------|------|------|
+| `frame_no` | int | 当前帧号 |
+| `_obs` | dict | 当前帧观测信息 |
+| `score` | int | 当前帧得分（清扫格数） |
+| `terminated` | bool | 是否终止（碰撞/电量耗尽） |
+| `truncated` | bool | 是否截断（达到最大步数/异常） |
+| `_state` | dict | 当前帧全局状态信息 |
+
+---
+
+### 数据结构定义（definition.py）
+
+开发目录：`<智能体文件夹>/feature/definition.py`
+
+使用 `create_cls` 动态定义三类核心数据结构：
+
+```python
+# 观测数据：agent.predict() 的输入
+ObsData = create_cls("ObsData",
+    feature=None,
+    legal_action=None,
+)
+
+# 动作数据：agent.predict() 的输出
+ActData = create_cls("ActData",
+    action=None,
+    prob=None,
+)
+
+# 训练样本：agent.learn() 的输入
+SampleData = create_cls("SampleData",
+    npdata=None
+)
+```
+
+#### 样本序列化（分布式训练必须实现）
+
+```python
+# SampleData → Numpy（用于网络传输），需加 @attached 装饰器
+@attached
+def SampleData2NumpyData(g_data):
+    return g_data.npdata
+
+# Numpy → SampleData（接收端还原），需加 @attached 装饰器
+@attached
+def NumpyData2SampleData(s_data):
+    return SampleData(npdata=s_data)
+```
+
+> ⚠️ 这两个函数互为反函数，**必须加 `@attached` 装饰器**，否则分布式框架无法调用。
+
+---
+
+### 特征处理（agent.py）
+
+#### `observation_process`：原始观测 → ObsData
+
+```python
+def observation_process(self, obs, state=None):
+    # obs: Observation 类型（env.reset/step 返回）
+    # state: EnvInfo 类型（可选）
+    # 建议将大量特征处理逻辑封装在 preprocessor.py 中
+    feature, legal_action, reward = self.preprocessor.feature_process(obs, self.last_action)
+    return ObsData(feature=list(feature), legal_action=legal_action)
+```
+
+#### `action_process`：ActData → 环境动作
+
+```python
+def action_process(self, act_data):
+    # 将智能体输出转换为 env.step() 可接受的格式
+    return act_data.action
+```
+
+---
+
+### 奖励设计（definition.py）
+
+```python
+def reward_shaping(obs, _obs, state, _state):
+    # 参数不限，可使用任意环境信息和先验知识
+    # 返回 float 类型的奖励值
+    reward = ...
+    return reward
+```
+
+> Score（env 返回的清扫格数）≠ Reward（此处人工设计），设计时注意区分。
+
+---
+
+### 样本处理（definition.py）
+
+```python
+@attached
+def sample_process(self, list_game_data):
+    # list_game_data: list[Frame]，一个 episode 的轨迹帧列表
+    return [SampleData(**i.__dict__) for i in list_game_data]
+```
+
+---
+
+### 智能体核心接口（agent.py）
+
+#### `predict`：训练时推断（随机采样）
+
+```python
+@predict_wrapper
+def predict(self, list_obs_data, list_state=None):
+    # 输入：list[ObsData]
+    # 输出：list[ActData]
+    return [ActData(action=..., prob=...)]
+```
+
+#### `exploit`：评估时推断（贪心选最优）
+
+```python
+@exploit_wrapper
+def exploit(self, observation):
+    # 输入：dict，原始观测
+    # 输出：list，环境可直接使用的动作列表
+    return action
+```
+
+#### `learn`：模型训练
+
+```python
+def learn(self, list_sample_data):
+    # 单机训练：手动在 workflow 中调用，直接训练模型
+    # 分布式训练：框架自动循环调用（同时也用于发送样本到样本池）
+    self.algo.learn(list_sample_data)
+```
+
+#### `load_model` / `save_model`
+
+```python
+@load_model_wrapper
+def load_model(self, path=None, id="1"):
+    model_file_path = f"{path}/model.ckpt-{str(id)}.pkl"
+    self.model.load_state_dict(torch.load(model_file_path, map_location=self.device))
+
+@save_model_wrapper
+def save_model(self, path=None, id="1"):
+    model_file_path = f"{path}/model.ckpt-{str(id)}.pkl"
+    model_state_dict_cpu = {k: v.clone().cpu() for k, v in self.model.state_dict().items()}
+    torch.save(model_state_dict_cpu, model_file_path)
+```
+
+> 文件名中必须包含 `model.ckpt-{id}` 字段；保存和加载的文件名必须一致。
+
+---
+
+### 模型开发（model/model.py）
+
+继承 `torch.nn.Module`，符合 PyTorch 规范：
+
+```python
+class Model(nn.Module):
+    def __init__(self, state_shape, action_shape=0, softmax=False):
+        super().__init__()
+        # 自定义网络层
+```
+
+---
+
+### 算法开发（algorithm/algorithm.py）
+
+```python
+def learn(self, list_sample_data):
+    # list_sample_data: list[SampleData]
+    loss = ...           # 基于算法计算 loss
+    loss.backward()      # 反向传播
+    self.optimizer.step()  # 梯度更新
+```
+
+---
+
+### 训练工作流（workflow.py）
+
+```python
+@attached
+def workflow(envs, agents, logger=None, monitor=None):
+    env, agent = envs[0], agents[0]
+
+    for epoch in range(epoch_num):
+        for g_data in run_episodes(episode_num, env, agent, logger, monitor):
+            agent.learn(g_data)   # 训练（或分布式发送样本）
+            g_data.clear()        # 清空，确保下轮样本是新的
+
+        # 按时间间隔保存模型（默认 300s = 5min，平台限制建议 30min）
+        if now - last_save_model_time >= 300:
+            agent.save_model()
+            last_save_model_time = now
+```
+
+#### 单局 episode 核心循环
+
+```python
+while not done:
+    act_data = agent.predict([obs_data])[0]
+    act = agent.action_process(act_data)
+    frame_no, _obs, score, terminated, truncated, _state = env.step(act)
+
+    _obs_data = agent.observation_process(_obs, _state)
+    reward = reward_shaping(obs_data, _obs_data, state, _state)
+    done = terminated or truncated
+
+    frame = Frame(obs=obs_data.feature, _obs=_obs_data.feature,
+                  act=act, rew=reward, done=done)
+    collector.append(frame)
+
+    if done:
+        yield sample_process(collector)  # 返回样本给 agent.learn()
+        break
+
+    obs_data, obs, state = _obs_data, _obs, _state
+```
+
+---
+
+### 文件目录结构
+
+```
+<智能体文件夹>/
+├── agent.py                    # 智能体：predict/exploit/learn/load_model/save_model
+├── feature/
+│   ├── definition.py           # 数据结构、奖励设计、样本处理
+│   └── preprocessor.py         # 特征工程（observation → feature vector）
+├── model/
+│   └── model.py                # 神经网络模型（继承 nn.Module）
+├── algorithm/
+│   └── algorithm.py            # 强化学习算法（learn 函数）
+├── workflow.py                 # 训练工作流（workflow 函数）
+└── diy/                        # 自定义算法模板（可选）
+```
