@@ -154,8 +154,11 @@ class Algorithm:
 
         对 logits 应用合法动作掩码后计算 softmax。
         """
-        label_max, _ = torch.max(logits * legal_action, dim=1, keepdim=True)
-        logits = logits - label_max
-        logits = logits * legal_action
-        logits = logits + 1e5 * (legal_action - 1)
-        return torch.nn.functional.softmax(logits, dim=1)
+        legal_mask = (legal_action > 0.5).to(dtype=logits.dtype)
+        has_legal = (legal_mask.sum(dim=1, keepdim=True) > 0).to(dtype=logits.dtype)
+        safe_mask = torch.where(has_legal > 0, legal_mask, torch.ones_like(legal_mask))
+
+        masked_logits = logits.masked_fill(safe_mask < 0.5, -1e9)
+        prob_dist = torch.nn.functional.softmax(masked_logits, dim=1) * safe_mask
+        prob_sum = prob_dist.sum(dim=1, keepdim=True).clamp_min(1e-9)
+        return prob_dist / prob_sum
