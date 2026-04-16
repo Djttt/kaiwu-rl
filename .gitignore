@@ -21,4 +21,4 @@ build/
 # IDE
 .idea/
 *.swp
-*.swo
+*.swologs/
