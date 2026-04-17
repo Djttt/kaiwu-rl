@@ -127,22 +127,38 @@ def _to_float(value, default=0.0):
 
 
 def _extract_env_score_step(state):
-    """Extract environment score-like signal for one step.
+    """Extract score signal from env reward payload.
 
-    提取环境单步得分信号（与 RL reward 区分）。
+    从环境 reward 负载中提取得分信号。
     """
     if state is None:
         return 0.0
 
     if isinstance(state, dict):
-        for key in ("reward", "step_score", "score", "clean_score"):
+        for key in ("step_score", "reward", "score", "clean_score", "total_score"):
             if key in state:
                 return _to_float(state.get(key), 0.0)
 
     if hasattr(state, "reward"):
         return _to_float(getattr(state, "reward"), 0.0)
 
+    if hasattr(state, "step_score"):
+        return _to_float(getattr(state, "step_score"), 0.0)
+
+    if hasattr(state, "score"):
+        return _to_float(getattr(state, "score"), 0.0)
+
     return 0.0
+
+
+def _extract_total_dirt(state):
+    """Extract total dirt count from env info.
+
+    从环境信息中提取全局污渍总数。
+    """
+    if isinstance(state, dict):
+        return max(_to_float(state.get("total_dirt", 1.0), 1.0), 1.0)
+    return 1.0
 
 
 def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
@@ -159,15 +175,26 @@ def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
     cur = _split_feature(obs)
     nxt = _split_feature(_obs)
 
-    # 1) Score component (environment feedback)
-    # 1) 得分项（环境反馈）
-    step_score = np.clip(_extract_env_score_step(state), 0.0, 10.0)
-    score_term = 0.08 * step_score
-
     # 2) Cleaning/progress component
     # 2) 清扫推进项
     clean_progress_gain = _to_float(nxt["base"][2] - cur["base"][2])
     progress_term = 4.0 * clean_progress_gain
+
+    # 1) Incremental score component (delta score only)
+    # 1) 增量得分项（只使用单步新增得分）
+    score_delta = kwargs.get("score_delta")
+    if score_delta is None:
+        # Fallback: approximate delta from cleaning progress ratio.
+        # 回退逻辑：用清扫进度增量近似单步得分。
+        score_delta = clean_progress_gain * _extract_total_dirt(_state)
+
+        # Backward compatibility: if caller provides explicit step_score, prefer it.
+        # 向后兼容：若调用方提供 step_score，则优先使用。
+        if score_delta <= 0.0 and isinstance(state, dict) and "step_score" in state:
+            score_delta = _extract_env_score_step(state)
+
+    step_score = np.clip(_to_float(score_delta, 0.0), 0.0, 10.0)
+    score_term = 0.08 * step_score
 
     # 3) Dirt-density reduction on global map
     # 3) 全局污渍密度下降项

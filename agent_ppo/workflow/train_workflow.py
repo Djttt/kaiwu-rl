@@ -22,6 +22,51 @@ from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
 
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _extract_env_score_total(env_reward):
+    """Extract cumulative score value from env reward payload.
+
+    从环境 reward 负载中提取累计得分。
+    """
+    if env_reward is None:
+        return 0.0
+
+    if isinstance(env_reward, dict):
+        for key in ("reward", "score", "clean_score", "total_score"):
+            if key in env_reward:
+                return _to_float(env_reward.get(key), 0.0)
+        return 0.0
+
+    for attr in ("reward", "score", "clean_score", "total_score"):
+        if hasattr(env_reward, attr):
+            return _to_float(getattr(env_reward, attr), 0.0)
+
+    return 0.0
+
+
+def _extract_env_step_score(env_reward):
+    """Extract per-step score if env payload provides it explicitly.
+
+    若环境显式提供单步得分，则提取该值。
+    """
+    if env_reward is None:
+        return None
+
+    if isinstance(env_reward, dict) and "step_score" in env_reward:
+        return _to_float(env_reward.get("step_score"), 0.0)
+
+    if hasattr(env_reward, "step_score"):
+        return _to_float(getattr(env_reward, "step_score"), 0.0)
+
+    return None
+
+
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
     env = envs[0]
@@ -99,6 +144,7 @@ class EpisodeRunner:
             done = False
             step = 0
             total_reward = 0.0
+            last_env_score_total = 0.0
 
             self.logger.info(f"Episode {self.episode_cnt} start")
 
@@ -124,12 +170,23 @@ class EpisodeRunner:
                 _obs_data, _ = self.agent.observation_process(env_obs)
                 _obs_data.frame_no = frame_no
 
+                # Use incremental score reward to avoid repeatedly rewarding cumulative score.
+                # 使用增量得分奖励，避免累计得分被重复奖励。
+                step_score = _extract_env_step_score(env_reward)
+                if step_score is None:
+                    env_score_total = _extract_env_score_total(env_reward)
+                    score_delta = max(0.0, env_score_total - last_env_score_total)
+                    last_env_score_total = env_score_total
+                else:
+                    score_delta = max(0.0, step_score)
+
                 reward_scalar = float(
                     reward_shaping(
                         obs=obs_data.feature,
                         _obs=_obs_data.feature,
                         state=env_reward,
                         _state=env_obs.get("observation", {}).get("env_info", {}),
+                        score_delta=score_delta,
                         terminated=terminated,
                         truncated=truncated,
                         done=done,
