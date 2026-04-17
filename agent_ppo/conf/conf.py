@@ -95,3 +95,11 @@ class Config:
 
     USE_GRAD_CLIP = True
     GRAD_CLIP_RANGE = 0.5
+
+    # Hard unstuck switch:
+    # if agent stays at same position for N consecutive steps,
+    # forbid the previous action for K steps.
+    # 硬脱困开关：若连续 N 步未位移，则强制屏蔽上一步动作 K 步。
+    ENABLE_HARD_UNSTUCK = True
+    HARD_UNSTUCK_TRIGGER_STEPS = 4
+    HARD_UNSTUCK_BAN_STEPS = 2

@@ -42,6 +42,10 @@ class Agent(BaseAgent):
         self.preprocessor = Preprocessor()
         self.last_action = -1
         self.last_reward = 0.0
+        self._same_pos_steps = 0
+        self._last_pos = None
+        self._hard_ban_action = -1
+        self._hard_ban_left = 0
 
         super().__init__(agent_type, device, logger, monitor)
 
@@ -53,6 +57,10 @@ class Agent(BaseAgent):
         self.preprocessor = Preprocessor()
         self.last_action = -1
         self.last_reward = 0.0
+        self._same_pos_steps = 0
+        self._last_pos = None
+        self._hard_ban_action = -1
+        self._hard_ban_left = 0
 
     def observation_process(self, env_obs):
         """Convert raw env_obs to ObsData (feature vector + legal action mask).
@@ -61,6 +69,7 @@ class Agent(BaseAgent):
         """
         feature, legal_action, reward = self.preprocessor.feature_process(env_obs, self.last_action)
         self.last_reward = reward
+        self._update_hard_unstuck_state()
 
         obs_data = ObsData(
             feature=list(feature),
@@ -76,6 +85,13 @@ class Agent(BaseAgent):
         """
         action = act_data.action if is_stochastic else act_data.d_action
         self.last_action = int(action[0])
+
+        if self._hard_ban_left > 0:
+            self._hard_ban_left -= 1
+            if self._hard_ban_left <= 0:
+                self._hard_ban_left = 0
+                self._hard_ban_action = -1
+
         return self.last_action
 
     def predict(self, list_obs_data):
@@ -90,7 +106,32 @@ class Agent(BaseAgent):
         logits, value = self._run_model(feature)
 
         legal_arr = self._sanitize_legal_action(legal_action)
-        prob = self._legal_soft_max(logits, legal_arr)
+        legal_arr = self._apply_hard_unstuck_ban(legal_arr)
+        if float(np.sum(legal_arr)) <= 0.0:
+            # Fallback to strategy-derived valid set when external legal mask is empty.
+            # 当外部合法动作掩码异常全0时，回退到策略先验推导的可行动作集合。
+            fallback_prior = self.preprocessor.get_action_strategy_prior(last_action=self.last_action)
+            fallback_prior = np.asarray(fallback_prior, dtype=np.float32).reshape(-1)
+            if fallback_prior.size < Config.ACTION_NUM:
+                fallback_prior = np.pad(
+                    fallback_prior,
+                    (0, Config.ACTION_NUM - fallback_prior.size),
+                    mode="constant",
+                    constant_values=0.0,
+                )
+            elif fallback_prior.size > Config.ACTION_NUM:
+                fallback_prior = fallback_prior[: Config.ACTION_NUM]
+
+            legal_arr = (fallback_prior > 1e-6).astype(np.float32)
+            legal_arr = self._apply_hard_unstuck_ban(legal_arr)
+            if float(np.sum(legal_arr)) <= 0.0:
+                legal_arr = np.ones(Config.ACTION_NUM, dtype=np.float32)
+                legal_arr = self._apply_hard_unstuck_ban(legal_arr)
+                if float(np.sum(legal_arr)) <= 0.0:
+                    legal_arr = np.ones(Config.ACTION_NUM, dtype=np.float32)
+
+        model_prob = self._legal_soft_max(logits, legal_arr)
+        prob = self._blend_with_action_strategy(model_prob, legal_arr)
         action = self._legal_sample(prob, use_max=False)
         d_action = self._legal_sample(prob, use_max=True)
 
@@ -103,10 +144,99 @@ class Agent(BaseAgent):
             )
         ]
 
-    def _sanitize_legal_action(self, legal_action):
-        """Convert legal action mask to 8D float array and ensure at least one legal action.
+    def _blend_with_action_strategy(self, model_prob, legal_arr):
+        """Blend learned policy with behavior strategy prior.
 
-        将合法动作掩码转为 8 维 float 数组，并保证至少有一个合法动作。
+        融合模型策略与行为先验。
+        """
+        strategy_prior = self.preprocessor.get_action_strategy_prior(last_action=self.last_action)
+        strategy_prior = np.asarray(strategy_prior, dtype=np.float32).reshape(-1)
+        if strategy_prior.size < Config.ACTION_NUM:
+            strategy_prior = np.pad(
+                strategy_prior,
+                (0, Config.ACTION_NUM - strategy_prior.size),
+                mode="constant",
+                constant_values=1.0,
+            )
+        elif strategy_prior.size > Config.ACTION_NUM:
+            strategy_prior = strategy_prior[: Config.ACTION_NUM]
+
+        strategy_prior = np.clip(strategy_prior, 0.0, None) * legal_arr
+        prior_sum = float(np.sum(strategy_prior))
+        if (not np.isfinite(prior_sum)) or prior_sum <= 0.0:
+            return model_prob
+
+        strategy_prob = strategy_prior / prior_sum
+
+        alpha = float(self.preprocessor.get_behavior_blend_alpha())
+        alpha = float(np.clip(alpha, 0.0, 0.9))
+
+        mixed_prob = (1.0 - alpha) * model_prob + alpha * strategy_prob
+        mixed_prob = mixed_prob * legal_arr
+
+        mixed_sum = float(np.sum(mixed_prob))
+        if (not np.isfinite(mixed_sum)) or mixed_sum <= 0.0:
+            return model_prob
+
+        return (mixed_prob / mixed_sum).astype(np.float32)
+
+    def _update_hard_unstuck_state(self):
+        """Update stuck counters and trigger hard action ban when needed.
+
+        更新卡住计数，并在需要时触发硬动作封禁。
+        """
+        if not bool(getattr(Config, "ENABLE_HARD_UNSTUCK", False)):
+            return
+
+        cur_pos = tuple(self.preprocessor.cur_pos) if hasattr(self.preprocessor, "cur_pos") else None
+        if cur_pos is None:
+            return
+
+        if self._last_pos is None:
+            self._same_pos_steps = 0
+        elif cur_pos == self._last_pos:
+            self._same_pos_steps += 1
+        else:
+            self._same_pos_steps = 0
+        self._last_pos = cur_pos
+
+        trigger_steps = max(int(getattr(Config, "HARD_UNSTUCK_TRIGGER_STEPS", 4)), 1)
+        if self._same_pos_steps >= trigger_steps and self.last_action is not None and int(self.last_action) >= 0:
+            if self._hard_ban_left <= 0:
+                self._hard_ban_action = int(self.last_action)
+                self._hard_ban_left = max(int(getattr(Config, "HARD_UNSTUCK_BAN_STEPS", 2)), 1)
+
+    def _apply_hard_unstuck_ban(self, legal_arr):
+        """Mask out banned action for a few steps in hard unstuck mode.
+
+        在硬脱困模式下短时屏蔽被封禁动作。
+        """
+        legal = np.asarray(legal_arr, dtype=np.float32).reshape(-1)
+        if legal.size < Config.ACTION_NUM:
+            legal = np.pad(legal, (0, Config.ACTION_NUM - legal.size), mode="constant", constant_values=0.0)
+        elif legal.size > Config.ACTION_NUM:
+            legal = legal[: Config.ACTION_NUM]
+
+        if not bool(getattr(Config, "ENABLE_HARD_UNSTUCK", False)):
+            return legal
+        if self._hard_ban_left <= 0:
+            return legal
+
+        ban_idx = int(self._hard_ban_action)
+        if ban_idx < 0 or ban_idx >= Config.ACTION_NUM:
+            return legal
+
+        out = legal.copy()
+        out[ban_idx] = 0.0
+
+        # If masking leads to all-zero, leave fallback handling to caller.
+        # 若屏蔽后全0，则交由上层回退逻辑处理。
+        return out
+
+    def _sanitize_legal_action(self, legal_action):
+        """Convert legal action mask to 8D float array.
+
+        将合法动作掩码转为 8 维 float 数组。
         """
         try:
             arr = np.asarray(legal_action, dtype=np.float32).reshape(-1)
@@ -119,10 +249,7 @@ class Agent(BaseAgent):
         elif arr.size > Config.ACTION_NUM:
             arr = arr[: Config.ACTION_NUM]
 
-        mask = (arr > 0.5).astype(np.float32)
-        if float(mask.sum()) <= 0.0:
-            mask[:] = 1.0
-        return mask
+        return (arr > 0.5).astype(np.float32)
 
     def exploit(self, env_obs):
         """Greedy inference for evaluation.
