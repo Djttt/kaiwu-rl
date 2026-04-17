@@ -184,11 +184,25 @@ def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
 
     # 5) Battery-aware charger guidance
     # 5) 低电量充电引导
+    battery_prev = _to_float(cur["base"][1])
     battery_ratio = _to_float(nxt["base"][1])
-    low_battery = max(0.0, 0.35 - battery_ratio) / 0.35
-    charger_prev = _to_float(cur["charger"][2])
-    charger_next = _to_float(nxt["charger"][2])
-    charger_term = 0.05 * low_battery * (charger_prev - charger_next)
+    low_battery = max(0.0, 0.55 - battery_ratio) / 0.55
+
+    # Prefer BFS-distance signal for return-to-charger planning.
+    # 优先使用 BFS 距离作为返航信号。
+    charger_prev = _to_float(cur["charger"][3])
+    charger_next = _to_float(nxt["charger"][3])
+    charger_term = 0.18 * low_battery * (charger_prev - charger_next)
+
+    # Penalize energy risk: estimated return distance exceeds battery margin.
+    # 惩罚电量风险：估计返航距离超过电量余量。
+    return_risk = max(0.0, charger_next + 0.08 - battery_ratio)
+    battery_risk_penalty = -0.25 * return_risk * (1.0 + low_battery)
+
+    # Reward successful charging events.
+    # 奖励成功充电行为。
+    charge_gain = max(0.0, battery_ratio - battery_prev)
+    charge_bonus = 0.12 * charge_gain
 
     # 6) NPC risk penalty (distance + approach risk)
     # 6) NPC 风险惩罚（距离 + 接近趋势）
@@ -203,11 +217,17 @@ def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
     backtrack_flag = _to_float(nxt["traj"][1])
     turn_rate = _to_float(nxt["traj"][2])
     progress_eff = _to_float(nxt["traj"][3])
-    traj_term = -0.01 * revisit_ratio - 0.008 * backtrack_flag - 0.005 * turn_rate + 0.01 * progress_eff
+    traj_term = -0.012 * revisit_ratio - 0.012 * backtrack_flag - 0.006 * turn_rate + 0.012 * progress_eff
 
-    # 8) Small step penalty to encourage efficiency
-    # 8) 时间惩罚（鼓励效率）
-    step_penalty = -0.001
+    # Extra anti-stuck penalty when looping with very low progress efficiency.
+    # 在低推进效率下反复回环时，增加防卡死惩罚。
+    stuck_flag = 1.0 if (revisit_ratio > 0.75 and progress_eff < 0.15) else 0.0
+    stuck_penalty = -0.03 * stuck_flag
+
+    # 8) Survival-first small bonus + step efficiency penalty
+    # 8) 生存优先的小奖励 + 时间惩罚
+    survival_term = 0.002
+    step_penalty = -0.0015
 
     reward = (
         score_term
@@ -215,8 +235,12 @@ def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
         + dirt_term
         + exploration_term
         + charger_term
+        + battery_risk_penalty
+        + charge_bonus
         + npc_penalty
         + traj_term
+        + stuck_penalty
+        + survival_term
         + step_penalty
     )
 

@@ -89,7 +89,7 @@ class Agent(BaseAgent):
 
         logits, value = self._run_model(feature)
 
-        legal_arr = np.array(legal_action, dtype=np.float32)
+        legal_arr = self._sanitize_legal_action(legal_action)
         prob = self._legal_soft_max(logits, legal_arr)
         action = self._legal_sample(prob, use_max=False)
         d_action = self._legal_sample(prob, use_max=True)
@@ -102,6 +102,27 @@ class Agent(BaseAgent):
                 value=value,
             )
         ]
+
+    def _sanitize_legal_action(self, legal_action):
+        """Convert legal action mask to 8D float array and ensure at least one legal action.
+
+        将合法动作掩码转为 8 维 float 数组，并保证至少有一个合法动作。
+        """
+        try:
+            arr = np.asarray(legal_action, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            arr = np.ones(Config.ACTION_NUM, dtype=np.float32)
+
+        if arr.size < Config.ACTION_NUM:
+            pad = np.ones(Config.ACTION_NUM - arr.size, dtype=np.float32)
+            arr = np.concatenate([arr, pad], axis=0)
+        elif arr.size > Config.ACTION_NUM:
+            arr = arr[: Config.ACTION_NUM]
+
+        mask = (arr > 0.5).astype(np.float32)
+        if float(mask.sum()) <= 0.0:
+            mask[:] = 1.0
+        return mask
 
     def exploit(self, env_obs):
         """Greedy inference for evaluation.
@@ -158,18 +179,36 @@ class Agent(BaseAgent):
 
         合法动作掩码下的 softmax。
         """
-        _w, _e = 1e20, 1e-5
-        tmp = logits - _w * (1.0 - legal_action)
-        tmp_max = np.max(tmp, keepdims=True)
-        tmp = np.clip(tmp - tmp_max, -_w, 1)
-        tmp = (np.exp(tmp) + _e) * legal_action
-        return tmp / (np.sum(tmp, keepdims=True) * 1.00001)
+        legal = self._sanitize_legal_action(legal_action)
+        masked_logits = np.where(legal > 0.5, logits, -1e9)
+        max_logit = float(np.max(masked_logits))
+        exp_logits = np.exp(np.clip(masked_logits - max_logit, -50.0, 50.0)) * legal
+
+        denom = float(np.sum(exp_logits))
+        if (not np.isfinite(denom)) or denom <= 0.0:
+            exp_logits = legal.astype(np.float64)
+            denom = float(np.sum(exp_logits))
+
+        return (exp_logits / max(denom, 1e-9)).astype(np.float32)
 
     def _legal_sample(self, probs, use_max=False):
         """Sample action from probability distribution (argmax if use_max=True).
 
         按概率分布采样动作（use_max=True 时取 argmax）。
         """
+        probs = np.asarray(probs, dtype=np.float64).reshape(-1)
+        if probs.size < Config.ACTION_NUM:
+            probs = np.pad(probs, (0, Config.ACTION_NUM - probs.size), mode="constant", constant_values=0.0)
+        elif probs.size > Config.ACTION_NUM:
+            probs = probs[: Config.ACTION_NUM]
+
+        probs = np.clip(probs, 0.0, None)
+        p_sum = float(np.sum(probs))
+        if (not np.isfinite(p_sum)) or p_sum <= 0.0:
+            probs = np.ones(Config.ACTION_NUM, dtype=np.float64) / float(Config.ACTION_NUM)
+        else:
+            probs = probs / p_sum
+
         if use_max:
             return int(np.argmax(probs))
-        return int(np.argmax(np.random.multinomial(1, probs, size=1)))
+        return int(np.random.choice(Config.ACTION_NUM, p=probs))
