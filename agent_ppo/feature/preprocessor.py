@@ -39,6 +39,16 @@ class Preprocessor:
     LOCAL_HALF = 3  # Cropped view radius (7×7) / 裁剪后的视野半径
     MAX_BFS_DIST = 256
     HISTORY_LEN = 20
+    ACTION_DIRS = (
+        (1, 0),
+        (1, -1),
+        (0, -1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    )
 
     def __init__(self):
         self.reset()
@@ -85,6 +95,78 @@ class Preprocessor:
 
         self._view_map = np.zeros((21, 21), dtype=np.float32)
         self._legal_act = [1] * 8
+
+    def _sanitize_legal_action(self, legal_action):
+        """Normalize legal action mask to 8D 0/1 list.
+
+        将合法动作掩码标准化为 8 维 0/1 列表。
+        """
+        if legal_action is None:
+            return [1] * Config.ACTION_NUM
+
+        try:
+            arr = list(legal_action)
+        except TypeError:
+            return [1] * Config.ACTION_NUM
+
+        out = [1] * Config.ACTION_NUM
+        for i in range(Config.ACTION_NUM):
+            if i < len(arr):
+                try:
+                    out[i] = 1 if float(arr[i]) > 0.5 else 0
+                except (TypeError, ValueError):
+                    out[i] = 0
+        return out
+
+    def _is_passable_in_view(self, ix, iz):
+        if self._view_map is None:
+            return True
+        h, w = self._view_map.shape
+        if ix < 0 or ix >= h or iz < 0 or iz >= w:
+            return False
+        return int(self._view_map[ix, iz]) != 0
+
+    def _compute_local_legal_action(self):
+        """Build legal action mask from local map with anti-corner rule.
+
+        基于局部地图和防穿角规则构造合法动作掩码。
+        """
+        if self._view_map is None:
+            return [1] * Config.ACTION_NUM
+
+        center = self._view_map.shape[0] // 2
+        legal = [0] * Config.ACTION_NUM
+
+        for i, (dx, dz) in enumerate(self.ACTION_DIRS):
+            tx, tz = center + dx, center + dz
+            if not self._is_passable_in_view(tx, tz):
+                continue
+
+            if dx != 0 and dz != 0:
+                # Diagonal anti-corner: at least one side-adjacent cell must be passable.
+                # 斜向防穿角：至少有一条边邻格可通行。
+                side_x = self._is_passable_in_view(center + dx, center)
+                side_z = self._is_passable_in_view(center, center + dz)
+                if not (side_x or side_z):
+                    continue
+
+            legal[i] = 1
+
+        return legal
+
+    def _merge_legal_action(self, env_legal, local_legal):
+        """Merge env legal action and local-map legal action robustly.
+
+        稳健融合环境合法动作与局部地图合法动作。
+        """
+        merged = [int(e and l) for e, l in zip(env_legal, local_legal)]
+        if sum(merged) > 0:
+            return merged
+        if sum(local_legal) > 0:
+            return local_legal
+        if sum(env_legal) > 0:
+            return env_legal
+        return [1] * Config.ACTION_NUM
 
     def _extract_positions(self, data):
         """Extract (x, z) positions recursively from dict/list structures.
@@ -235,7 +317,11 @@ class Preprocessor:
         self.total_dirt = max(int(env_info["total_dirt"]), 1)
 
         # Legal actions / 合法动作
-        self._legal_act = [int(x) for x in (observation.get("legal_action") or [1] * 8)]
+        # Compatible with multiple field names from different environment versions.
+        # 兼容不同环境版本中的合法动作字段命名。
+        env_legal = self._sanitize_legal_action(
+            observation.get("legal_action", observation.get("legal_act", observation.get("legal_actions")))
+        )
 
         # Local view map (21×21) / 局部视野地图
         map_info = observation.get("map_info")
@@ -243,6 +329,9 @@ class Preprocessor:
             self._view_map = np.array(map_info, dtype=np.float32)
             hx, hz = self.cur_pos
             self._update_passable(hx, hz)
+
+        local_legal = self._compute_local_legal_action()
+        self._legal_act = self._merge_legal_action(env_legal, local_legal)
 
     def _update_passable(self, hx, hz):
         """Write local view into global passable map.
