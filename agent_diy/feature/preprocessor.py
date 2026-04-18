@@ -14,7 +14,7 @@ from collections import deque
 
 import numpy as np
 
-from agent_ppo.conf.conf import Config
+from agent_diy.conf.conf import Config
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -587,33 +587,16 @@ class Preprocessor:
         return np.concatenate([explored_grid.flatten(), dirty_grid.flatten()], dtype=np.float32)
 
     def _get_local_view_feature(self):
-        """Local view feature (49D): crop center 7×7 from 21×21.
+        """Local view feature (441D): full 21x21 map.
 
-        局部视野特征（49D）：从 21×21 视野中心裁剪 7×7。
+        局部视野特征（441D）：完整 21x21 地图。
         """
-        center = self.VIEW_HALF
-        h = self.LOCAL_HALF
-        crop = self._view_map[center - h : center + h + 1, center - h : center + h + 1]
-        return (crop / 2.0).flatten()
+        return (self._view_map / 2.0).flatten()
 
     def _get_global_state_feature(self):
         """Global state feature with extended engineering features.
 
         包含扩展特征工程的全局状态特征。
-
-        Dimensions / 维度说明：
-          [0]  step_norm         step progress / 步数归一化 [0,1]
-          [1]  battery_ratio     battery level / 电量比 [0,1]
-          [2]  cleaning_progress cleaned ratio / 已清扫比例 [0,1]
-          [3]  remaining_dirt    remaining dirt ratio / 剩余污渍比例 [0,1]
-          [4]  pos_x_norm        x position / x 坐标归一化 [0,1]
-          [5]  pos_z_norm        z position / z 坐标归一化 [0,1]
-          [6]  ray_N_dirt        north ray distance / 向上（z-）方向最近污渍距离
-          [7]  ray_E_dirt        east ray distance / 向右（x+）方向
-          [8]  ray_S_dirt        south ray distance / 向下（z+）方向
-          [9]  ray_W_dirt        west ray distance / 向左（x-）方向
-          [10] nearest_dirt_norm nearest dirt Euclidean distance / 最近污渍欧氏距离归一化
-          [11] dirt_delta        approaching dirt indicator / 是否在接近污渍（1=是, 0=否）
         """
         step_norm = _norm(self.step_no, 2000)
         battery_ratio = _norm(self.battery, self.battery_max)
@@ -652,8 +635,7 @@ class Preprocessor:
                         break
             ray_dirt.append(_norm(found, max_ray))
 
-        # Nearest dirt Euclidean distance (estimated from 7×7 crop)
-        # 最近污渍欧氏距离（视野内 7×7 粗估）
+        # Nearest dirt Euclidean distance
         self.last_nearest_dirt_dist = self.nearest_dirt_dist
         self.nearest_dirt_dist = self._calc_nearest_dirt_dist()
         nearest_dirt_norm = _norm(self.nearest_dirt_dist, 180)
@@ -711,209 +693,6 @@ class Preprocessor:
         """
         return list(self._legal_act)
 
-    def _get_zone_target_center(self):
-        """Get the best coarse cleaning zone center from dirty/explored memory.
-
-        从污渍/探索记忆中选取最佳粗粒度清扫分区中心。
-        """
-        mid = self.GRID_SIZE // 2
-        zones = [
-            (0, mid, 0, mid),
-            (0, mid, mid, self.GRID_SIZE),
-            (mid, self.GRID_SIZE, 0, mid),
-            (mid, self.GRID_SIZE, mid, self.GRID_SIZE),
-        ]
-        centers = [
-            (mid // 2, mid // 2),
-            (mid // 2, (mid + self.GRID_SIZE) // 2),
-            ((mid + self.GRID_SIZE) // 2, mid // 2),
-            ((mid + self.GRID_SIZE) // 2, (mid + self.GRID_SIZE) // 2),
-        ]
-
-        best_idx = 0
-        best_score = -1e9
-        for i, (x0, x1, z0, z1) in enumerate(zones):
-            dirty_density = float(np.mean(self.dirty_memory_map[x0:x1, z0:z1]))
-            explored_density = float(np.mean(self.explored_map[x0:x1, z0:z1]))
-            unexplored_density = 1.0 - explored_density
-            score = dirty_density + 0.35 * unexplored_density
-            if score > best_score:
-                best_score = score
-                best_idx = i
-
-        return centers[best_idx], float(best_score)
-
-    def _window_memory_stats(self, x, z, radius=2):
-        x0 = max(0, x - radius)
-        x1 = min(self.GRID_SIZE, x + radius + 1)
-        z0 = max(0, z - radius)
-        z1 = min(self.GRID_SIZE, z + radius + 1)
-
-        if x1 <= x0 or z1 <= z0:
-            return 0.0, 0.0
-
-        explored_density = float(np.mean(self.explored_map[x0:x1, z0:z1]))
-        dirty_density = float(np.mean(self.dirty_memory_map[x0:x1, z0:z1]))
-        unexplored_density = 1.0 - explored_density
-        return dirty_density, unexplored_density
-
-    def get_behavior_blend_alpha(self):
-        """Return dynamic blend ratio between model policy and behavior strategy prior.
-
-        返回模型策略与行为先验融合比例。
-        """
-        battery_ratio = float(self.battery) / float(max(self.battery_max, 1))
-        low_battery = float(np.clip((0.45 - battery_ratio) / 0.45, 0.0, 1.0))
-
-        npc_urgency = float(np.clip((8.0 - self.nearest_npc_dist) / 8.0, 0.0, 1.0))
-
-        hist = list(self.position_history)
-        revisit_risk = 0.0
-        if len(hist) >= 8:
-            revisit_risk = 1.0 - len(set(hist[-8:])) / float(len(hist[-8:]))
-
-        alpha = 0.20 + 0.45 * max(low_battery, npc_urgency) + 0.20 * revisit_risk
-
-        # If agent is continuously not moving, rely more on strategy prior to escape corners.
-        # 若智能体连续原地不动，提升先验权重以脱困。
-        if len(hist) >= 4 and len(set(hist[-4:])) == 1:
-            alpha = max(alpha, 0.85)
-
-        return float(np.clip(alpha, 0.20, 0.90))
-
-    def get_action_strategy_prior(self, last_action=-1):
-        """Build 8D action prior for charging, avoidance, and cleaning planning.
-
-        构建 8 维动作先验：充电策略 + 躲避策略 + 清扫规划。
-        """
-        legal = np.asarray(self.get_legal_action(), dtype=np.float32).reshape(-1)
-        if legal.size < Config.ACTION_NUM:
-            legal = np.pad(legal, (0, Config.ACTION_NUM - legal.size), mode="constant", constant_values=1.0)
-        elif legal.size > Config.ACTION_NUM:
-            legal = legal[: Config.ACTION_NUM]
-
-        # Prefer locally reconstructed legal actions to reduce wall-hitting when env mask is noisy.
-        # 优先使用本地重建合法动作，降低环境掩码噪声导致的撞墙。
-        local_legal = np.asarray(self._compute_local_legal_action(), dtype=np.float32).reshape(-1)
-        if local_legal.size < Config.ACTION_NUM:
-            local_legal = np.pad(local_legal, (0, Config.ACTION_NUM - local_legal.size), mode="constant")
-        elif local_legal.size > Config.ACTION_NUM:
-            local_legal = local_legal[: Config.ACTION_NUM]
-
-        if float(np.sum(local_legal)) > 0.0:
-            legal = legal * local_legal
-            if float(np.sum(legal)) <= 0.0:
-                legal = local_legal
-
-        if float(np.sum(legal)) <= 0.0:
-            legal = np.ones(Config.ACTION_NUM, dtype=np.float32)
-
-        prior = np.ones(Config.ACTION_NUM, dtype=np.float32)
-        hx, hz = self.cur_pos
-        hist = list(self.position_history)
-        recent_hist = set(hist[-8:]) if hist else set()
-
-        battery_ratio = float(self.battery) / float(max(self.battery_max, 1))
-
-        cur_charger_dist = 1e9
-        if self.charger_positions:
-            _, cur_charger_dist = self._nearest_position(self.charger_positions)
-
-        target_center, _ = self._get_zone_target_center()
-
-        for i, (dx, dz) in enumerate(self.ACTION_DIRS):
-            if legal[i] < 0.5:
-                prior[i] = 0.0
-                continue
-
-            nx, nz = hx + dx, hz + dz
-            if not (0 <= nx < self.GRID_SIZE and 0 <= nz < self.GRID_SIZE):
-                prior[i] = 0.0
-                continue
-
-            # Cleaning planning: immediate local tile + memory frontier.
-            # 清扫规划：邻格清扫价值 + 记忆前沿探索价值。
-            lx = self.VIEW_HALF + dx
-            lz = self.VIEW_HALF + dz
-            if not self._is_passable_in_view(lx, lz):
-                prior[i] = 0.0
-                continue
-
-            local_cell = int(self._view_map[lx, lz])
-            if local_cell == 2:
-                prior[i] *= 1.9
-            elif local_cell == 1:
-                prior[i] *= 0.95
-            else:
-                prior[i] *= 0.6
-
-            dirty_density, unexplored_density = self._window_memory_stats(nx, nz, radius=2)
-            prior[i] *= 1.0 + 0.65 * dirty_density + 0.35 * unexplored_density
-
-            if (nx, nz) in recent_hist:
-                prior[i] *= 0.55
-
-            # Zone coverage planning when nearby dirt is sparse.
-            # 附近污渍稀少时，按分区覆盖规划推进。
-            if self.nearest_dirt_dist > 2.5:
-                tx, tz = target_center
-                vtx = float(tx - hx)
-                vtz = float(tz - hz)
-                tv_norm = float(np.sqrt(vtx * vtx + vtz * vtz) + 1e-6)
-                align = float((dx * vtx + dz * vtz) / (np.sqrt(dx * dx + dz * dz) * tv_norm + 1e-6))
-                prior[i] *= 1.0 + 0.25 * float(np.clip(align, -0.8, 1.0))
-
-            # Charging strategy: reserve return energy and move toward charger when needed.
-            # 充电策略：预留返程电量，低电时优先向充电桩推进。
-            if self.charger_positions:
-                next_charger_dist = min(float(np.hypot(nx - cx, nz - cz)) for cx, cz in self.charger_positions)
-                improve = cur_charger_dist - next_charger_dist
-
-                reserve_margin = 14.0 + 0.35 * cur_charger_dist
-                battery_steps = float(self.battery)
-                charge_urgency = float(np.clip((reserve_margin - battery_steps) / max(reserve_margin, 1.0), 0.0, 1.0))
-                charge_urgency = max(charge_urgency, float(np.clip((0.42 - battery_ratio) / 0.42, 0.0, 1.0)))
-
-                if charge_urgency > 0.0:
-                    prior[i] *= 1.0 + (0.9 + 1.4 * charge_urgency) * float(np.clip(improve, -1.0, 1.5))
-
-            # NPC avoidance: penalize directions entering predicted danger area.
-            # 躲避策略：惩罚进入 NPC 预测危险区的方向。
-            if self.npc_positions:
-                risk = 0.0
-                for j, (px, pz) in enumerate(self.npc_positions):
-                    vx, vz = self.npc_velocities[j] if j < len(self.npc_velocities) else (0.0, 0.0)
-                    pred_x = float(px + vx)
-                    pred_z = float(pz + vz)
-                    d = float(np.hypot(nx - pred_x, nz - pred_z))
-                    risk += float(np.exp(-d / 3.0))
-                    if d < 1.5:
-                        risk += 2.0
-
-                danger_scale = 1.6 if self.nearest_npc_dist < 8.0 else 1.0
-                prior[i] *= float(np.exp(-0.45 * danger_scale * risk))
-
-            # Spiral-like smooth movement: prefer straight/slight-turn, avoid hard backtrack.
-            # 螺旋式平滑推进：偏好直行/小转向，抑制大折返。
-            if last_action is not None and int(last_action) >= 0:
-                diff = (i - int(last_action)) % Config.ACTION_NUM
-                circular = min(diff, Config.ACTION_NUM - diff)
-                if circular == 0:
-                    prior[i] *= 1.08
-                elif circular == 1:
-                    prior[i] *= 1.12
-                elif circular >= 3:
-                    prior[i] *= 0.88
-                if circular == 4:
-                    prior[i] *= 0.65
-
-        prior = np.clip(prior, 1e-5, 50.0) * legal
-        if float(np.sum(prior)) <= 0.0:
-            prior = legal.copy()
-        if float(np.sum(prior)) <= 0.0:
-            prior = np.ones(Config.ACTION_NUM, dtype=np.float32)
-        return prior.astype(np.float32)
-
     def feature_process(self, env_obs, last_action):
         """Generate feature vector, legal action mask, and scalar reward.
 
@@ -921,9 +700,9 @@ class Preprocessor:
         """
         self.pb2struct(env_obs, last_action)
 
-        local_view = self._get_local_view_feature()  # 49D
+        local_view = self._get_local_view_feature()
         global_state = self._get_global_state_feature()
-        legal_action = self.get_legal_action()  # 8D
+        legal_action = self.get_legal_action()
         legal_arr = np.array(legal_action, dtype=np.float32)
 
         feature = np.concatenate([local_view, global_state, legal_arr]).astype(np.float32)

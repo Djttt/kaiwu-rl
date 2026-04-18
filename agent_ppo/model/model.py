@@ -48,13 +48,18 @@ class _Encoder(nn.Module):
         super().__init__()
         local_dim = 128
         global_dim = 128
+        
+        # Calculate flat dimension after conv layers (which preserve size 21x21)
+        # 计算卷积层后的平铺维度（卷积保持 21x21 尺寸）
+        flat_dim = 32 * Config.LOCAL_VIEW_SHAPE[1] * Config.LOCAL_VIEW_SHAPE[2]
+        
         self.local_cnn = nn.Sequential(
             _make_conv(1, 16, gain=1.0),
             nn.ReLU(),
             _make_conv(16, 32, gain=1.0),
             nn.ReLU(),
             nn.Flatten(),
-            _make_fc(32 * 7 * 7, local_dim),
+            _make_fc(flat_dim, local_dim),
             nn.ReLU(),
         )
         self.global_mlp = nn.Sequential(

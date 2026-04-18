@@ -15,7 +15,7 @@ class Config:
 
     # Feature dimensions
     # 特征维度
-    LOCAL_VIEW_LEN = 7 * 7
+    LOCAL_VIEW_LEN = 21 * 21
     LEGAL_ACTION_LEN = 8
 
     # Global state sub-features
@@ -70,7 +70,7 @@ class Config:
     FEATURE_LEN = sum(FEATURES)
     DIM_OF_OBSERVATION = FEATURE_LEN
 
-    LOCAL_VIEW_SHAPE = (1, 7, 7)
+    LOCAL_VIEW_SHAPE = (1, 21, 21)
 
     # Action space: 8 directional moves
     # 动作空间：8个方向移动
