@@ -22,7 +22,7 @@ def build_monitor():
     monitor = MonitorConfigBuilder()
 
     config_dict = (
-        monitor.title("扫地机器人 (DQN)")
+        monitor.title("扫地机器人-DQN")
         .add_group(
             group_name="算法指标",
             group_name_en="algorithm",
