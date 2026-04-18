@@ -22,7 +22,7 @@ def build_monitor():
     monitor = MonitorConfigBuilder()
 
     config_dict = (
-        monitor.title("扫地机器人")
+        monitor.title("扫地机器人 (DQN)")
         .add_group(
             group_name="算法指标",
             group_name_en="algorithm",
@@ -38,43 +38,23 @@ def build_monitor():
         )
         .end_panel()
         .add_panel(
-            name="总损失",
-            name_en="total_loss",
+            name="DQN 训练损失",
+            name_en="loss",
             type="line",
         )
         .add_metric(
-            metrics_name="total_loss",
-            expr="avg(total_loss{})",
+            metrics_name="loss",
+            expr="avg(loss{})",
         )
         .end_panel()
         .add_panel(
-            name="价值损失",
-            name_en="value_loss",
+            name="平均 Q 值",
+            name_en="q_mean",
             type="line",
         )
         .add_metric(
-            metrics_name="value_loss",
-            expr="avg(value_loss{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="策略损失",
-            name_en="policy_loss",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="policy_loss",
-            expr="avg(policy_loss{})",
-        )
-        .end_panel()
-        .add_panel(
-            name="熵损失",
-            name_en="entropy_loss",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="entropy_loss",
-            expr="avg(entropy_loss{})",
+            metrics_name="q_mean",
+            expr="avg(q_mean{})",
         )
         .end_panel()
         .end_group()

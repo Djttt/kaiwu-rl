@@ -108,71 +108,42 @@ def _extract_total_dirt(state):
 def reward_shaping(obs, _obs, state=None, _state=None, **kwargs):
     """Compute shaped RL reward from current/next feature states.
 
-    依据当前/下一时刻特征计算强化学习 reward。
+    在消融实验的基础上，加回了“NPC 生存约束”与“电量保持约束”：
+    让机器人能在高效清扫的同时，学会保命和回家。
     """
     cur = _split_feature(obs)
     nxt = _split_feature(_obs)
 
-    # 1) Progress / Cleaning Term
-    clean_progress_gain = _to_float(nxt["base"][2] - cur["base"][2])
-    progress_term = 4.0 * clean_progress_gain
-
-    # 2) Score Term
+    # 1) 清扫奖励 (主线任务)
     score_delta = kwargs.get("score_delta", 0.0)
     step_score = np.clip(_to_float(score_delta, 0.0), 0.0, 10.0)
-    score_term = 0.08 * step_score
+    cleaning_reward = 0.1 * step_score
 
-    # 3) Dirt-density reduction
-    dirt_drop = _to_float(np.mean(cur["dirt_map"]) - np.mean(nxt["dirt_map"]))
-    dirt_term = 0.6 * dirt_drop
+    # 2) 时间惩罚 (鼓励高效)
+    step_penalty = -0.002
 
-    # 4) Exploration bonus
-    explored_gain = max(
-        0.0,
-        _to_float(np.mean(nxt["map_memory_explored"]) - np.mean(cur["map_memory_explored"])),
-    )
-    exploration_term = 0.2 * explored_gain
-
-    # 5) Battery-aware charger guidance
-    battery_ratio = _to_float(nxt["base"][1])
-    low_battery = max(0.0, 0.55 - battery_ratio) / 0.55
-    charger_prev = _to_float(cur["charger"][3])
-    charger_next = _to_float(nxt["charger"][3])
-    charger_term = 0.18 * low_battery * (charger_prev - charger_next)
-
-    # 6) Energy risk penalty
-    return_risk = max(0.0, charger_next + 0.08 - battery_ratio)
-    battery_risk_penalty = -0.25 * return_risk * (1.0 + low_battery)
-
-    # 7) NPC risk penalty
+    # 3) 生存约束：躲避 NPC
+    # 距离越近、NPC朝向自己速度越快，惩罚越大
     npc_dist = _to_float(nxt["npc"][2])
     npc_approach = _to_float(nxt["npc"][3])
     npc_danger = _to_float(nxt["npc"][4])
-    npc_penalty = -0.03 * npc_danger * (1.0 - npc_dist) * (0.5 + npc_approach)
+    npc_penalty = -0.05 * npc_danger * (1.0 - npc_dist) * (0.5 + npc_approach)
 
-    # 8) Trajectory shaping
-    revisit_ratio = _to_float(nxt["traj"][0])
-    backtrack_flag = _to_float(nxt["traj"][1])
-    turn_rate = _to_float(nxt["traj"][2])
-    progress_eff = _to_float(nxt["traj"][3])
-    traj_term = -0.012 * revisit_ratio - 0.012 * backtrack_flag - 0.006 * turn_rate + 0.012 * progress_eff
+    # 4) 资源约束：电量管理与返航
+    battery_prev = _to_float(cur["base"][1])
+    battery_ratio = _to_float(nxt["base"][1])
+    charger_next = _to_float(nxt["charger"][3])
+    
+    # 风险惩罚：当预期返航距离（+0.05的冗余）超过当前电量比例时，施加惩罚，迫使模型在电量不足时必须往充电桩走
+    return_risk = max(0.0, charger_next + 0.05 - battery_ratio)
+    battery_risk_penalty = -0.3 * return_risk
 
-    # Survival and step penalty
-    survival_term = 0.002
-    step_penalty = -0.0015
+    # 充电奖励：成功充上电的瞬间给出显著正反馈，鼓励充电行为
+    charge_gain = max(0.0, battery_ratio - battery_prev)
+    charge_bonus = 0.15 * charge_gain
 
-    reward = (
-        score_term
-        + progress_term
-        + dirt_term
-        + exploration_term
-        + charger_term
-        + battery_risk_penalty
-        + npc_penalty
-        + traj_term
-        + survival_term
-        + step_penalty
-    )
+    # 总奖励
+    reward = cleaning_reward + step_penalty + npc_penalty + battery_risk_penalty + charge_bonus
 
     if not np.isfinite(reward):
         return 0.0
