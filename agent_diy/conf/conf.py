@@ -84,15 +84,15 @@ class Config:
     # DQN 超参数
     GAMMA = 0.99
     BATCH_SIZE = 64
-    REPLAY_BUFFER_CAPACITY = 100000
+    REPLAY_BUFFER_CAPACITY = 500000
     TARGET_UPDATE_FREQ = 1000
     LEARNING_RATE = 0.0001
     
     # Epsilon greedy parameters
     # Epsilon 贪心参数
     EPSILON_START = 1.0
-    EPSILON_END = 0.05
-    EPSILON_DECAY = 50000
+    EPSILON_END = 0.15
+    EPSILON_DECAY = 250000
     
     # Soft update tau
     # 目标网络软更新系数

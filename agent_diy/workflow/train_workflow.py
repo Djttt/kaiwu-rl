@@ -159,7 +159,15 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
             if training_metrics:
                 logger.info(f"training_metrics: {training_metrics}")
             if monitor:
-                monitor.put_data({os.getpid(): {"reward": total_reward, "episode_cnt": episode_cnt}})
+                monitor.put_data(
+                    {
+                        os.getpid(): {
+                            "reward": total_reward,
+                            "episode_cnt": episode_cnt,
+                            "epsilon": getattr(agent, "epsilon", 1.0),
+                        }
+                    }
+                )
             last_metrics_time = now
 
         # In distributed mode, learner usually handles saving, but aisrv can trigger it.

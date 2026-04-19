@@ -57,6 +57,26 @@ def build_monitor():
             expr="avg(q_mean{})",
         )
         .end_panel()
+        .add_panel(
+            name="探索率 (Epsilon)",
+            name_en="epsilon",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="epsilon",
+            expr="avg(epsilon{})",
+        )
+        .end_panel()
+        .add_panel(
+            name="训练局数",
+            name_en="episode_cnt",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="episode_cnt",
+            expr="max(episode_cnt{})",
+        )
+        .end_panel()
         .end_group()
         .build()
     )
